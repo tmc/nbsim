@@ -16,7 +16,6 @@ import (
 	"github.com/rs/cors"
 	"github.com/tmc/langchaingo/llms"
 	"github.com/tmc/langchaingo/llms/anthropic"
-	"github.com/tmc/langchaingo/schema"
 	"github.com/tmc/nbsim"
 )
 
@@ -93,7 +92,7 @@ func handleAssetsWithRootFallback(assets fs.FS) http.Handler {
 func repl(ctx context.Context, llm llms.Model) error {
 	scanner := bufio.NewScanner(os.Stdin)
 	history := []llms.MessageContent{
-		llms.TextParts(schema.ChatMessageTypeSystem, nbsim.SystemPrompt),
+		llms.TextParts(llms.ChatMessageTypeSystem, nbsim.SystemPrompt),
 	}
 	nw := nbsim.NewNotebookWriter(*flagGenDir, "generated")
 	for {
@@ -110,8 +109,8 @@ func repl(ctx context.Context, llm llms.Model) error {
 			}
 		*/
 		input := "https://brev.dev/notebooks/super-hyped/finetune-llama-7.ipynb"
-		history = append(history, llms.TextParts(schema.ChatMessageTypeHuman, input))
-		history = append(history, llms.TextParts(schema.ChatMessageTypeAI, "{"))
+		history = append(history, llms.TextParts(llms.ChatMessageTypeHuman, input))
+		history = append(history, llms.TextParts(llms.ChatMessageTypeAI, "{"))
 		_, err := llm.GenerateContent(ctx,
 			history,
 			llms.WithTemperature(1),
@@ -156,9 +155,9 @@ func (s *Server) handleGen(w http.ResponseWriter, r *http.Request) {
 			input = "/notebooks/super-hyped/finetune-llama-7.ipynb"
 		}
 		history := []llms.MessageContent{
-			llms.TextParts(schema.ChatMessageTypeSystem, nbsim.SystemPrompt),
-			llms.TextParts(schema.ChatMessageTypeHuman, input),
-			llms.TextParts(schema.ChatMessageTypeAI, "{"),
+			llms.TextParts(llms.ChatMessageTypeSystem, nbsim.SystemPrompt),
+			llms.TextParts(llms.ChatMessageTypeHuman, input),
+			llms.TextParts(llms.ChatMessageTypeAI, "{"),
 		}
 		_, err := s.llm.GenerateContent(ctx,
 			history,
