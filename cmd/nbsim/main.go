@@ -29,6 +29,7 @@ func main() {
 	flag.Parse()
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 }
 
@@ -97,18 +98,15 @@ func repl(ctx context.Context, llm llms.Model) error {
 	nw := nbsim.NewNotebookWriter(*flagGenDir, "generated")
 	for {
 		ctx, cancelFn := context.WithCancel(ctx)
-		_ = scanner
-		/*
-			fmt.Print("$ ")
-			if !scanner.Scan() {
-				break
-			}
-			input := strings.TrimSpace(scanner.Text())
-			if input == "" {
-				continue
-			}
-		*/
-		input := "https://brev.dev/notebooks/super-hyped/finetune-llama-7.ipynb"
+		fmt.Print("$ ")
+		if !scanner.Scan() {
+			break
+		}
+		input := strings.TrimSpace(scanner.Text())
+		if input == "" {
+			cancelFn()
+			continue
+		}
 		history = append(history, llms.TextParts(llms.ChatMessageTypeHuman, input))
 		history = append(history, llms.TextParts(llms.ChatMessageTypeAI, "{"))
 		_, err := llm.GenerateContent(ctx,
@@ -127,6 +125,7 @@ func repl(ctx context.Context, llm llms.Model) error {
 		}
 		fmt.Println()
 	}
+	return nil
 }
 
 func (s *Server) handleGen(w http.ResponseWriter, r *http.Request) {
