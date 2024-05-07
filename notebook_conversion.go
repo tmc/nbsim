@@ -38,22 +38,29 @@ func (h *Handler) resolvePath(path string) string {
 }
 
 func (h *Handler) pathExistsOrWill(htmlPath string) bool {
-	ipynbPath := h.htmlToIpynbPath(htmlPath)
-	if s, err := os.Stat(h.resolvePath(htmlPath)); err == nil {
-		return !s.IsDir()
+	// return true unless it's a dir:
+	// if starts with gen-, return true:
+	if strings.HasPrefix(htmlPath, "/gen-") {
+		return true
 	}
-	if s, err := os.Stat(h.resolvePath(ipynbPath)); err == nil {
-		return !s.IsDir()
+	si, _ := os.Stat(h.resolvePath(htmlPath))
+	if si != nil && si.IsDir() {
+		return false
 	}
-	return false
+	// return false if it's index.html or /assets/*:
+	if htmlPath == "/index.html" || strings.HasPrefix(htmlPath, "/assets/") {
+		return false
+	}
+	return true
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	fmt.Println("pathExistsOrWill?", h.pathExistsOrWill(r.URL.Path), r.URL.Path)
 	if h.pathExistsOrWill(r.URL.Path) {
-		fmt.Println("calling serveStreamedNotebookConversion")
+		fmt.Println("calling serveStreamedNotebookConversion for", r.URL.Path)
 		h.serveStreamedNotebookConversion(w, r)
 	} else {
-		fmt.Println("calling not found handler")
+		fmt.Println(" --> serving static file server for", r.URL.Path)
 		h.NotFoundHandler.ServeHTTP(w, r)
 	}
 }
@@ -79,6 +86,9 @@ func (h *Handler) serveStreamedNotebookConversion(w http.ResponseWriter, r *http
 
 	// Derive the notebookPath from the URL (replace html with ipynb)
 	notebookPath := "." + strings.Replace(r.URL.Path, ".html", ".ipynb", 1)
+	if !strings.HasSuffix(notebookPath, ".ipynb") {
+		notebookPath = notebookPath + ".ipynb"
+	}
 
 	// Flush the response writer
 	flusher, ok := w.(http.Flusher)
@@ -87,12 +97,16 @@ func (h *Handler) serveStreamedNotebookConversion(w http.ResponseWriter, r *http
 		return
 	}
 
+	t1 := time.Now()
 	for {
 		fmt.Println("loop")
 		// Read the notebook file
 		notebook, err := os.ReadFile(h.resolvePath(notebookPath))
 		if err != nil {
-			fmt.Fprintln(w, err)
+			if os.IsNotExist(err) && time.Since(t1) < 5*time.Second {
+				time.Sleep(500 * time.Millisecond)
+				continue
+			}
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -117,15 +131,13 @@ func (h *Handler) serveStreamedNotebookConversion(w http.ResponseWriter, r *http
 
 		if !headerWritten && len(divs) > 0 {
 			headerWritten = true
-			fmt.Println("writing preamble")
-			time.Sleep(1 * time.Second)
 			fmt.Fprint(w, getPreamble(htmlBody))
 		}
 
 		// // Write the divs to the response
 		for _, div := range divs {
 			fmt.Println("writing div")
-			time.Sleep(1 * time.Second)
+			time.Sleep(650 * time.Millisecond)
 			fmt.Println(div)
 			fmt.Fprint(w, div)
 			flusher.Flush()
@@ -190,7 +202,7 @@ func generateNotebookHTML(in []byte) (string, error) {
 		return "", err
 	}
 	// Run nbconvert to convert the notebook to HTML
-	html, err := runNbconvert(tmpFile.Name(), false)
+	html, err := runNbconvert(tmpFile.Name(), true)
 	if err != nil {
 		return "", err
 	}

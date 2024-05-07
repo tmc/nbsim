@@ -123,3 +123,8 @@ func (nw *notebookWriter) convert() {
 	// cmd.Stderr = os.Stderr
 	cmd.Start()
 }
+
+func (nw *notebookWriter) TouchOutputFile() {
+	of := nw.filePath(fmt.Sprintf("%s.ipynb", nw.outfileBase))
+	os.WriteFile(of, []byte(nw.repaired), 0644)
+}

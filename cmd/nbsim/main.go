@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/md5"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -11,7 +12,6 @@ import (
 	"os"
 	"path"
 	"strings"
-	"time"
 
 	"github.com/rs/cors"
 	"github.com/tmc/langchaingo/llms"
@@ -67,7 +67,7 @@ func serve(ctx context.Context, llm llms.Model) error {
 	}
 	assetServer := handleAssetsWithRootFallback(assetsFS)
 
-	http.HandleFunc("/gen", s.handleGen)
+	http.HandleFunc("/_gen", s.handleGen)
 	http.Handle("/", nbsim.NewNotebookConversionHandler(*flagGenDir, assetServer))
 	return http.ListenAndServe(":8080", ch.Handler(http.DefaultServeMux))
 }
@@ -114,7 +114,6 @@ func repl(ctx context.Context, llm llms.Model) error {
 			llms.WithTemperature(1),
 			llms.WithMaxTokens(4096),
 			llms.WithStreamingFunc(func(ctx context.Context, chunk []byte) error {
-				//fmt.Print(string(chunk))
 				nw.AddPart(string(chunk))
 				return nil
 			}),
@@ -131,19 +130,24 @@ func repl(ctx context.Context, llm llms.Model) error {
 func (s *Server) handleGen(w http.ResponseWriter, r *http.Request) {
 	payload := map[string]any{}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		fmt.Println("error decoding payload:", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	nbBase := fmt.Sprintf("gen-%d", time.Now().Unix())
+	// md5 the url to get a unique identifier:
+	nbBase := fmt.Sprintf("gen-%x", md5.Sum([]byte(payload["url"].(string))))
 	nbHTMLPath := fmt.Sprintf("%s.html", nbBase)
 
 	nw := nbsim.NewNotebookWriter(*flagGenDir, nbBase)
-	if _, ok := s.alreadyGenerated[nbBase]; ok {
+	nw.TouchOutputFile()
+
+	if s.isAlreadyGenerated(nbBase) {
 		json.NewEncoder(w).Encode(map[string]string{"url": nbHTMLPath})
 		return
 	}
-	s.alreadyGenerated[nbBase] = nbHTMLPath
-	fmt.Println("generating notebook", nbBase)
+
+	s.setAlreadyGenerated(nbBase, nbHTMLPath)
+	fmt.Println("generating notebook", nbBase, "for", payload["url"])
 
 	go func() {
 		ctx, cancelFn := context.WithCancel(context.Background())
@@ -158,21 +162,42 @@ func (s *Server) handleGen(w http.ResponseWriter, r *http.Request) {
 			llms.TextParts(llms.ChatMessageTypeHuman, input),
 			llms.TextParts(llms.ChatMessageTypeAI, "{"),
 		}
-		_, err := s.llm.GenerateContent(ctx,
+		// open log file for append:
+		lf, err := os.OpenFile(path.Join(*flagGenDir, nbBase+".claude.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		if err != nil {
+			fmt.Println("error opening log file:", err)
+		}
+		_, err = s.llm.GenerateContent(ctx,
 			history,
 			llms.WithTemperature(1),
 			llms.WithMaxTokens(4096),
 			llms.WithStreamingFunc(func(ctx context.Context, chunk []byte) error {
-				fmt.Print(string(chunk))
+				// append to .claude.log:
+				if lf != nil {
+					lf.Write(chunk)
+				}
 				nw.AddPart(string(chunk))
 				return nil
 			}),
 		)
-		//nw.outfileBase + ".ipynb"
 		if err != nil {
 			fmt.Println("error generating content:", err)
 			return
 		}
 	}()
 	json.NewEncoder(w).Encode(map[string]string{"url": nbHTMLPath})
+}
+
+func (s *Server) isAlreadyGenerated(key string) bool {
+	_, ok := s.alreadyGenerated[key]
+	if !ok {
+		// stat the file to see if it exists:
+		_, err := os.Stat(path.Join(*flagGenDir, key+".ipynb"))
+		ok = err == nil
+	}
+	return ok
+}
+
+func (s *Server) setAlreadyGenerated(key, value string) {
+	s.alreadyGenerated[key] = value
 }

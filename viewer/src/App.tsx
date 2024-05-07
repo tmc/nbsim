@@ -12,7 +12,7 @@ function App() {
     if (fetching) return;
     console.log("fetching", path);
     const fetchfn = async () => {
-      const o = await fetch('http://localhost:8080/gen', {
+      const o = await fetch('http://localhost:8080/_gen', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

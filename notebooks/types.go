@@ -6,13 +6,16 @@ type Notebook struct {
 	Metadata      Metadata `json:"metadata"`
 	NBFormatMinor int      `json:"nbformat_minor"`
 	NBFormat      int      `json:"nbformat"`
-	Cells         []Cell   `json:"cells,omitempty"`
+	Cells         []Cell   `json:"cells"`
 }
 
 func (n *Notebook) Validate() {
 	n.Metadata.Validate()
 	if n.NBFormat == 0 {
 		n.NBFormat = 4
+	}
+	if n.Cells == nil {
+		n.Cells = []Cell{}
 	}
 	for _, cell := range n.Cells {
 		cell.Validate()
