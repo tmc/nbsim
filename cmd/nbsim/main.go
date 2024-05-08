@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 
 	"github.com/rs/cors"
@@ -67,8 +69,8 @@ func serve(ctx context.Context, llm llms.Model) error {
 	}
 	assetServer := handleAssetsWithRootFallback(assetsFS)
 
-	http.HandleFunc("/_gen", s.handleGen)
-	http.Handle("/", nbsim.NewNotebookConversionHandler(*flagGenDir, assetServer))
+	//http.HandleFunc("/_gen", s.handleGen)
+	http.Handle("/", nbsim.NewNotebookConversionHandler(*flagGenDir, assetServer, s.generateNotebook))
 	return http.ListenAndServe(":8080", ch.Handler(http.DefaultServeMux))
 }
 
@@ -134,57 +136,19 @@ func (s *Server) handleGen(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	// md5 the url to get a unique identifier:
-	nbBase := fmt.Sprintf("gen-%x", md5.Sum([]byte(payload["url"].(string))))
-	nbHTMLPath := fmt.Sprintf("%s.html", nbBase)
 
-	nw := nbsim.NewNotebookWriter(*flagGenDir, nbBase)
-	nw.TouchOutputFile()
+	path, ok := payload["url"].(string)
+	if !ok {
+		path = "/notebooks/super-hyped/finetune-llama-7.ipynb"
+	}
 
-	if s.isAlreadyGenerated(nbBase) {
-		json.NewEncoder(w).Encode(map[string]string{"url": nbHTMLPath})
+	u, _ := url.Parse(path)
+	nbHTMLPath, err := s.generateNotebook(u)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	s.setAlreadyGenerated(nbBase, nbHTMLPath)
-	fmt.Println("generating notebook", nbBase, "for", payload["url"])
-
-	go func() {
-		ctx, cancelFn := context.WithCancel(context.Background())
-		defer cancelFn()
-
-		input, ok := payload["url"].(string)
-		if !ok {
-			input = "/notebooks/super-hyped/finetune-llama-7.ipynb"
-		}
-		history := []llms.MessageContent{
-			llms.TextParts(llms.ChatMessageTypeSystem, nbsim.SystemPrompt),
-			llms.TextParts(llms.ChatMessageTypeHuman, input),
-			llms.TextParts(llms.ChatMessageTypeAI, "{"),
-		}
-		// open log file for append:
-		lf, err := os.OpenFile(path.Join(*flagGenDir, nbBase+".claude.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-		if err != nil {
-			fmt.Println("error opening log file:", err)
-		}
-		_, err = s.llm.GenerateContent(ctx,
-			history,
-			llms.WithTemperature(1),
-			llms.WithMaxTokens(4096),
-			llms.WithStreamingFunc(func(ctx context.Context, chunk []byte) error {
-				// append to .claude.log:
-				if lf != nil {
-					lf.Write(chunk)
-				}
-				nw.AddPart(string(chunk))
-				return nil
-			}),
-		)
-		if err != nil {
-			fmt.Println("error generating content:", err)
-			return
-		}
-	}()
 	json.NewEncoder(w).Encode(map[string]string{"url": nbHTMLPath})
 }
 
@@ -200,4 +164,62 @@ func (s *Server) isAlreadyGenerated(key string) bool {
 
 func (s *Server) setAlreadyGenerated(key, value string) {
 	s.alreadyGenerated[key] = value
+}
+
+func (s *Server) generateNotebook(l *url.URL) (string, error) {
+	// md5 the url to get a unique identifier:
+	path := l.String()
+	nbBase := fmt.Sprintf("gen-%x", md5.Sum([]byte(l.String())))
+	nbHTMLPath := fmt.Sprintf("%s.html", nbBase)
+
+	// if we already have an output file, return early, unless it looks old enough and is empty:
+	if s.isAlreadyGenerated(nbBase) {
+		fi, err := os.Stat(filepath.Join(*flagGenDir, nbHTMLPath))
+		if err == nil && fi.Size() > 0 {
+			return nbHTMLPath, nil
+		}
+	}
+
+	nw := nbsim.NewNotebookWriter(*flagGenDir, nbBase)
+	nw.TouchOutputFile()
+
+	if s.isAlreadyGenerated(nbBase) {
+		return nbHTMLPath, nil
+	}
+
+	s.setAlreadyGenerated(nbBase, nbHTMLPath)
+	fmt.Println("generating notebook", nbBase, "for", path)
+
+	ctx, cancelFn := context.WithCancel(context.Background())
+	defer cancelFn()
+
+	history := []llms.MessageContent{
+		llms.TextParts(llms.ChatMessageTypeSystem, nbsim.SystemPrompt),
+		llms.TextParts(llms.ChatMessageTypeHuman, path),
+		llms.TextParts(llms.ChatMessageTypeAI, "{"),
+	}
+	// open log file for append:
+	lf, err := os.OpenFile(filepath.Join(*flagGenDir, nbBase+".claude.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		fmt.Println("error opening log file:", err)
+	}
+	_, err = s.llm.GenerateContent(ctx,
+		history,
+		llms.WithTemperature(1),
+		llms.WithMaxTokens(4096),
+		llms.WithStreamingFunc(func(ctx context.Context, chunk []byte) error {
+			// append to .claude.log:
+			if lf != nil {
+				lf.Write(chunk)
+			}
+			nw.AddPart(string(chunk))
+			return nil
+		}),
+	)
+	if err != nil {
+		fmt.Println("error generating content:", err)
+		return "", err
+	}
+
+	return nbHTMLPath, nil
 }

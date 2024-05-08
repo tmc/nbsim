@@ -54,7 +54,7 @@ type Author struct {
 type Cell struct {
 	ID             string                `json:"id"`
 	CellType       string                `json:"cell_type"`
-	Metadata       *CellMetadata         `json:"metadata,omitempty"`
+	Metadata       *CellMetadata         `json:"metadata"`
 	Source         *MultilineString      `json:"source,omitempty"`
 	Attachments    map[string]MimeBundle `json:"attachments,omitempty"`
 	Outputs        []Output              `json:"outputs"`

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,15 +18,17 @@ import (
 )
 
 type Handler struct {
-	RootDir         string
-	NotFoundHandler http.Handler
+	RootDir           string
+	StaticFileHandler http.Handler
+	GenFunc           func(*url.URL) (string, error)
 }
 
 // handleNotebookConversion handles the conversion of a notebook to html
-func NewNotebookConversionHandler(rootDir string, notFoundHandler http.Handler) *Handler {
+func NewNotebookConversionHandler(rootDir string, notFoundHandler http.Handler, genNewPath func(*url.URL) (string, error)) *Handler {
 	return &Handler{
-		RootDir:         rootDir,
-		NotFoundHandler: notFoundHandler,
+		RootDir:           rootDir,
+		StaticFileHandler: notFoundHandler,
+		GenFunc:           genNewPath,
 	}
 }
 
@@ -48,21 +51,26 @@ func (h *Handler) pathExistsOrWill(htmlPath string) bool {
 		return false
 	}
 	// return false if it's index.html or /assets/*:
-	if htmlPath == "/index.html" || strings.HasPrefix(htmlPath, "/assets/") {
+	if htmlPath == "/index.html" || strings.HasPrefix(htmlPath, "/assets/") || strings.HasPrefix(htmlPath, "/favicon.ico") {
 		return false
 	}
 	return true
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	fmt.Println("pathExistsOrWill?", h.pathExistsOrWill(r.URL.Path), r.URL.Path)
-	if h.pathExistsOrWill(r.URL.Path) {
-		fmt.Println("calling serveStreamedNotebookConversion for", r.URL.Path)
-		h.serveStreamedNotebookConversion(w, r)
-	} else {
-		fmt.Println(" --> serving static file server for", r.URL.Path)
-		h.NotFoundHandler.ServeHTTP(w, r)
+	// 404 favicon.ico:
+	if r.URL.Path == "/favicon.ico" {
+		http.Error(w, "404 favicon.ico", http.StatusNotFound)
+		return
 	}
+	// fmt.Println("pathExistsOrWill?", h.pathExistsOrWill(r.URL.Path), r.URL.Path)
+	// if h.pathExistsOrWill(r.URL.Path) {
+	fmt.Println("calling serveStreamedNotebookConversion for", r.URL.Path)
+	h.serveStreamedNotebookConversion(w, r)
+	// } else {
+	// 	fmt.Println(" --> serving static file server for", r.URL.Path)
+	// 	h.NotFoundHandler.ServeHTTP(w, r)
+	// }
 }
 
 // serveStreamedNotebookConversion serves the conversion of a notebook to html.
@@ -84,11 +92,20 @@ func (h *Handler) serveStreamedNotebookConversion(w http.ResponseWriter, r *http
 	var headerWritten bool
 	var notebookJSON string
 
-	// Derive the notebookPath from the URL (replace html with ipynb)
-	notebookPath := "." + strings.Replace(r.URL.Path, ".html", ".ipynb", 1)
-	if !strings.HasSuffix(notebookPath, ".ipynb") {
-		notebookPath = notebookPath + ".ipynb"
+	r.URL.Host = ""
+	r.URL.Scheme = ""
+
+	// url to gen-$(md5).html:
+	// if starts with gen-, call GenFunc and return
+	if strings.HasPrefix(r.URL.Path, "/gen-") {
+		p, err := h.GenFunc(r.URL)
+		fmt.Println(r.URL.Path, "GenFunc returned", p, err)
+		return
 	}
+
+	pathMd5 := fmt.Sprintf("%x", md5.Sum([]byte(r.URL.Path)))
+	notebookPath := fmt.Sprintf("/gen-%s.ipynb", pathMd5)
+	notebookRawPath := fmt.Sprintf("/gen-%s-raw.ipynb", pathMd5)
 
 	// Flush the response writer
 	flusher, ok := w.(http.Flusher)
@@ -96,15 +113,21 @@ func (h *Handler) serveStreamedNotebookConversion(w http.ResponseWriter, r *http
 		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
 		return
 	}
-
 	t1 := time.Now()
-	for {
-		fmt.Println("loop")
+	for i := 0; i < 1000; i++ {
+		time.Sleep(10 * time.Millisecond)
+		fmt.Println("loop", i)
 		// Read the notebook file
-		notebook, err := os.ReadFile(h.resolvePath(notebookPath))
+		notebook, err := os.ReadFile(h.resolvePath(notebookRawPath))
 		if err != nil {
-			if os.IsNotExist(err) && time.Since(t1) < 5*time.Second {
-				time.Sleep(500 * time.Millisecond)
+			if os.IsNotExist(err) && time.Since(t1) < 10*time.Second {
+				if i == 0 {
+					go func() {
+						p, err := h.GenFunc(r.URL)
+						fmt.Println(r.URL, "GenFunc returned", p, err)
+					}()
+				}
+				time.Sleep(time.Second)
 				continue
 			}
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -113,20 +136,19 @@ func (h *Handler) serveStreamedNotebookConversion(w http.ResponseWriter, r *http
 
 		// Check if the notebook has finished generating
 		notebookJSON, notebookDone = notebooks.RepairNotebookJSON(string(notebook))
-		fmt.Fprintln(os.Stderr, "notebookDone", notebookDone)
+		fmt.Fprintln(os.Stderr, "notebookDone", notebookDone, "notebookJSON", notebookJSON)
 
 		// Generate the HTML body
 		htmlBody, err := generateNotebookHTML([]byte(notebookJSON))
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+			fmt.Println("error generating notebook HTML:", err)
+			continue
 		}
 		// Get the complete divs
 		divs, err := getCompleteDivs(notebookDone, htmlBody, prevDivCount)
 		if err != nil {
-			fmt.Fprintln(w, err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+			fmt.Println("error getting complete divs:", err)
+			continue
 		}
 
 		if !headerWritten && len(divs) > 0 {
@@ -136,7 +158,7 @@ func (h *Handler) serveStreamedNotebookConversion(w http.ResponseWriter, r *http
 
 		// // Write the divs to the response
 		for _, div := range divs {
-			fmt.Println("writing div")
+			fmt.Println("writing div for", r.URL.Path, "(done?", notebookDone, ")", len(divs), "divs")
 			time.Sleep(650 * time.Millisecond)
 			fmt.Println(div)
 			fmt.Fprint(w, div)
@@ -159,8 +181,10 @@ func (h *Handler) serveStreamedNotebookConversion(w http.ResponseWriter, r *http
 		// Check if the notebook file has been modified
 		fileInfo, err := os.Stat(notebookPath)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+			if os.IsNotExist(err) {
+				continue
+			}
+			fmt.Println("error statting", notebookPath, err)
 		}
 
 		if fileInfo.ModTime().After(lastModTime) {
@@ -169,6 +193,7 @@ func (h *Handler) serveStreamedNotebookConversion(w http.ResponseWriter, r *http
 			// If no update for a certain amount of time, assume notebook is done
 			time.Sleep(5 * time.Second)
 			if time.Since(lastModTime) > 30*time.Second {
+				fmt.Println("notebook done by timeout")
 				notebookDone = true
 			}
 		}
@@ -204,7 +229,7 @@ func generateNotebookHTML(in []byte) (string, error) {
 	// Run nbconvert to convert the notebook to HTML
 	html, err := runNbconvert(tmpFile.Name(), true)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("error running nbconvert: %w", err)
 	}
 	cache[md5] = string(html)
 	return string(html), nil
@@ -213,6 +238,7 @@ func generateNotebookHTML(in []byte) (string, error) {
 // runNbconvert runs nbconvert to convert a notebook to HTML.
 func runNbconvert(notebookPath string, debug bool) (string, error) {
 	// Run nbconvert to convert the notebook to HTML
+	fmt.Println("running nbconvert", notebookPath)
 	cmd := exec.Command("jupyter", "nbconvert", "--to", "html", notebookPath)
 
 	if debug {
@@ -289,34 +315,8 @@ func getCompleteDivs(notebookDone bool, htmlBody string, prevDivCount int) ([]st
 		}
 	}
 	// Return the divs
+	if len(divs) == 0 {
+		return nil, fmt.Errorf("no divs found")
+	}
 	return divs[prevDivCount:], nil
 }
-
-// // walkNodes walks the nodes of a notebook and generates the HTML representation.
-// func walkNodes(notebook []byte, htmlBody string) {
-// 	// Create an HTML tokenizer
-// 	tokenizer := html.NewTokenizer(strings.NewReader(htmlContent))
-// 	// Variable to store the last div element
-// 	var lastDiv *html.Token
-// 	// Iterate over the HTML tokens
-// 	for {
-// 		tokenType := tokenizer.Next()
-// 		if tokenType == html.ErrorToken {
-// 			break
-// 		}
-
-// 		token := tokenizer.Token()
-
-// 		// Check if the token is a div element
-// 		if token.Type == html.StartTagToken && token.Data == "div" {
-// 			lastDiv = &token
-// 		}
-
-// 		// Write the token to the response writer if it's not the last div or closing tags
-// 		if token.Type != html.EndTagToken || (token.Data != "body" && token.Data != "html") {
-// 			if lastDiv == nil || token != *lastDiv {
-// 				fmt.Fprintf(w, "%v", token)
-// 			}
-// 		}
-// 	}
-// }

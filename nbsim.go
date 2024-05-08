@@ -70,7 +70,7 @@ func (nw *notebookWriter) AddPart(part string) {
 		// os.WriteFile("partial.ipynb", []byte(s), 0644)
 	}
 	nb := &notebooks.Notebook{}
-	os.WriteFile(nw.filePath("-raw"), []byte(nw.repaired), 0644)
+	os.WriteFile(nw.filePath("-raw"), []byte(strings.Join(nw.parts, "")), 0644)
 	if err := json.Unmarshal([]byte(nw.repaired), nb); err != nil {
 		fmt.Println("issue unmarshalling json:", err)
 		return
@@ -126,5 +126,7 @@ func (nw *notebookWriter) convert() {
 
 func (nw *notebookWriter) TouchOutputFile() {
 	of := nw.filePath(fmt.Sprintf("%s.ipynb", nw.outfileBase))
+	os.WriteFile(of, []byte(nw.repaired), 0644)
+	of = nw.filePath(fmt.Sprintf("%s-raw.ipynb", nw.outfileBase))
 	os.WriteFile(of, []byte(nw.repaired), 0644)
 }
