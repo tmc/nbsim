@@ -19,9 +19,9 @@ func RepairNotebookJSON(s string) (string, bool) {
 		if err := json.Unmarshal([]byte(s+suffix), &o); err == nil {
 			noSuffixNeeded = suffix == ``
 			repaired = []byte(s + suffix)
-			if noSuffixNeeded {
-				fmt.Println("No suffix needed, got original:", s)
-			}
+			// if noSuffixNeeded {
+			// 	fmt.Println("No suffix needed, got original:", s)
+			// }
 			break
 		}
 	}

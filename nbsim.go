@@ -86,6 +86,11 @@ func (nw *notebookWriter) AddPart(part string) {
 	os.WriteFile(of, []byte(repaired), 0644)
 }
 
+func (nw *notebookWriter) Finish() error {
+	// write -final version:
+	return os.WriteFile(nw.filePath("-final"), []byte(nw.repaired), 0644)
+}
+
 func (nw *notebookWriter) startConverter(ctx context.Context) {
 	for {
 		select {

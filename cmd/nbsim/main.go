@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"crypto/md5"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io/fs"
@@ -14,6 +13,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/rs/cors"
 	"github.com/tmc/langchaingo/llms"
@@ -70,7 +70,7 @@ func serve(ctx context.Context, llm llms.Model) error {
 	assetServer := handleAssetsWithRootFallback(assetsFS)
 
 	//http.HandleFunc("/_gen", s.handleGen)
-	http.Handle("/", nbsim.NewNotebookConversionHandler(*flagGenDir, assetServer, s.generateNotebook))
+	http.Handle("/", nbsim.NewNotebookConversionHandler(*flagGenDir, assetServer, s.trickleNotebook))
 	return http.ListenAndServe(":8080", ch.Handler(http.DefaultServeMux))
 }
 
@@ -129,29 +129,31 @@ func repl(ctx context.Context, llm llms.Model) error {
 	return nil
 }
 
-func (s *Server) handleGen(w http.ResponseWriter, r *http.Request) {
-	payload := map[string]any{}
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		fmt.Println("error decoding payload:", err)
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
+// func (s *Server) handleGen(w http.ResponseWriter, r *http.Request) {
+// 	payload := map[string]any{}
+// 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+// 		fmt.Println("error decoding payload:", err)
+// 		http.Error(w, err.Error(), http.StatusBadRequest)
+// 		return
+// 	}
 
-	path, ok := payload["url"].(string)
-	if !ok {
-		path = "/notebooks/super-hyped/finetune-llama-7.ipynb"
-	}
+// 	path, ok := payload["url"].(string)
+// 	if !ok {
+// 		path = "/notebooks/super-hyped/finetune-llama-7.ipynb"
+// 	}
 
-	u, _ := url.Parse(path)
-	nbHTMLPath, err := s.generateNotebook(u)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
+// 	u, _ := url.Parse(path)
+// 	nbHTMLPath, err := s.generateNotebook(u)
+// 	if err != nil {
+// 		http.Error(w, err.Error(), http.StatusInternalServerError)
+// 		return
+// 	}
 
-	json.NewEncoder(w).Encode(map[string]string{"url": nbHTMLPath})
-}
+// 	json.NewEncoder(w).Encode(map[string]string{"url": nbHTMLPath})
+// }
 
+// isAlreadyGenerated returns true if the key has already been generated.
+// If the key is not in the alreadyGenerated map, it will check the filesystem
 func (s *Server) isAlreadyGenerated(key string) bool {
 	_, ok := s.alreadyGenerated[key]
 	if !ok {
@@ -164,6 +166,38 @@ func (s *Server) isAlreadyGenerated(key string) bool {
 
 func (s *Server) setAlreadyGenerated(key, value string) {
 	s.alreadyGenerated[key] = value
+}
+
+func (s *Server) trickleNotebook(l *url.URL) (string, error) {
+	// md5 the url to get a unique identifier:
+	path := l.String()
+	nbBase := fmt.Sprintf("gen-%x", md5.Sum([]byte(l.String())))
+	// if we already have an output file, return early, unless it looks old enough and is empty:
+	if !s.isAlreadyGenerated(nbBase) {
+		fmt.Println("opting to generate notebook", nbBase, "for", path)
+		return s.generateNotebook(l)
+	}
+
+	nw := nbsim.NewNotebookWriter(*flagGenDir, nbBase)
+	nw.TouchOutputFile()
+	s.setAlreadyGenerated(nbBase, nbBase)
+
+	nbRawPath := fmt.Sprintf("%s-raw.ipynb", nbBase)
+	fmt.Println("trickling notebook", nbBase, "for", path)
+
+	// we trickle by opening the -final file and writing it to the -raw file:
+	f, err := os.ReadFile(filepath.Join(*flagGenDir, nbBase+"-final.ipynb"))
+	if err != nil {
+		return "", err
+	}
+
+	// split to fields, add parts with delay:
+	parts := strings.Fields(string(f))
+	for _, part := range parts {
+		nw.AddPart(part)
+		time.Sleep(100 * time.Millisecond)
+	}
+	return nbRawPath, nil
 }
 
 func (s *Server) generateNotebook(l *url.URL) (string, error) {
@@ -216,10 +250,13 @@ func (s *Server) generateNotebook(l *url.URL) (string, error) {
 			return nil
 		}),
 	)
+	// finalize by writing to gen-%s-final.ipynb
+	if err := nw.Finish(); err != nil {
+		fmt.Println("error finalizing notebook:", err)
+	}
 	if err != nil {
 		fmt.Println("error generating content:", err)
 		return "", err
 	}
-
 	return nbHTMLPath, nil
 }
