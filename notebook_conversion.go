@@ -2,6 +2,7 @@ package nbsim
 
 import (
 	"bytes"
+	"context"
 	"crypto/md5"
 	"fmt"
 	"net/http"
@@ -20,10 +21,10 @@ import (
 type Handler struct {
 	RootDir           string
 	StaticFileHandler http.Handler
-	GenFunc           func(*url.URL) (string, error)
+	GenFunc           func(context.Context, *url.URL) (chan string, error)
 }
 
-func NewNotebookConversionHandler(rootDir string, notFoundHandler http.Handler, genNewPath func(*url.URL) (string, error)) *Handler {
+func NewNotebookConversionHandler(rootDir string, notFoundHandler http.Handler, genNewPath func(context.Context, *url.URL) (chan string, error)) *Handler {
 	return &Handler{
 		RootDir:           rootDir,
 		StaticFileHandler: notFoundHandler,
@@ -46,7 +47,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) serveStreamedNotebook(w http.ResponseWriter, r *http.Request) {
-	go h.GenFunc(r.URL)
+	partsCh, err := h.GenFunc(r.Context(), r.URL)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Transfer-Encoding", "chunked")
+
+	for part := range partsCh {
+		fmt.Print(".")
+		fmt.Fprint(w, part)
+		w.(http.Flusher).Flush()
+	}
 }
 
 func (h *Handler) serveStreamedNotebookConversion1(w http.ResponseWriter, r *http.Request) {
@@ -63,7 +76,7 @@ func (h *Handler) serveStreamedNotebookConversion1(w http.ResponseWriter, r *htt
 	r.URL.Scheme = ""
 
 	if strings.HasPrefix(r.URL.Path, "/gen-") {
-		p, err := h.GenFunc(r.URL)
+		p, err := h.GenFunc(r.Context(), r.URL)
 		fmt.Println(r.URL.Path, "GenFunc returned", p, err)
 		return
 	}
@@ -88,7 +101,7 @@ func (h *Handler) serveStreamedNotebookConversion1(w http.ResponseWriter, r *htt
 			if os.IsNotExist(err) && time.Since(t1) < 10*time.Second {
 				if i == 0 {
 					go func() {
-						p, err := h.GenFunc(r.URL)
+						p, err := h.GenFunc(r.Context(), r.URL)
 						fmt.Println(r.URL, "GenFunc returned", p, err)
 					}()
 				}

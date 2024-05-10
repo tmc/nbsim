@@ -71,6 +71,7 @@ func serve(ctx context.Context, llm llms.Model) error {
 
 	//http.HandleFunc("/_gen", s.handleGen)
 	http.Handle("/", nbsim.NewNotebookConversionHandler(*flagGenDir, assetServer, s.trickleNotebook))
+	fmt.Println("serving on :8080")
 	return http.ListenAndServe(":8080", ch.Handler(http.DefaultServeMux))
 }
 
@@ -168,7 +169,7 @@ func (s *Server) setAlreadyGenerated(key, value string) {
 	s.alreadyGenerated[key] = value
 }
 
-func (s *Server) trickleNotebook(l *url.URL) (string, error) {
+func (s *Server) trickleNotebook(ctx context.Context, l *url.URL) (chan string, error) {
 	// md5 the url to get a unique identifier:
 	path := l.String()
 	nbBase := fmt.Sprintf("gen-%x", md5.Sum([]byte(l.String())))
@@ -182,44 +183,39 @@ func (s *Server) trickleNotebook(l *url.URL) (string, error) {
 	nw.TouchOutputFile()
 	s.setAlreadyGenerated(nbBase, nbBase)
 
-	nbRawPath := fmt.Sprintf("%s-raw.ipynb", nbBase)
 	fmt.Println("trickling notebook", nbBase, "for", path)
-
 	// we trickle by opening the -final file and writing it to the -raw file:
 	f, err := os.ReadFile(filepath.Join(*flagGenDir, nbBase+"-final.ipynb"))
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
-	// split to fields, add parts with delay:
-	parts := strings.Fields(string(f))
-	for _, part := range parts {
-		nw.AddPart(part)
-		time.Sleep(100 * time.Millisecond)
-	}
-	return nbRawPath, nil
+	ch := make(chan string)
+	go func() {
+		defer close(ch)
+		// split to fields, add parts with delay:
+		parts := strings.Fields(string(f))
+
+		fmt.Println("trickling", len(parts), "parts")
+		for _, part := range parts {
+			nw.AddPart(part)
+			time.Sleep(10 * time.Millisecond)
+			if part, ok := nw.NextPart(); ok {
+				ch <- part
+			}
+		}
+	}()
+	return ch, nil
 }
 
-func (s *Server) generateNotebook(l *url.URL) (string, error) {
+func (s *Server) generateNotebook(l *url.URL) (chan string, error) {
 	// md5 the url to get a unique identifier:
 	path := l.String()
 	nbBase := fmt.Sprintf("gen-%x", md5.Sum([]byte(l.String())))
 	nbHTMLPath := fmt.Sprintf("%s.html", nbBase)
 
-	// if we already have an output file, return early, unless it looks old enough and is empty:
-	if s.isAlreadyGenerated(nbBase) {
-		fi, err := os.Stat(filepath.Join(*flagGenDir, nbHTMLPath))
-		if err == nil && fi.Size() > 0 {
-			return nbHTMLPath, nil
-		}
-	}
-
 	nw := nbsim.NewNotebookWriter(*flagGenDir, nbBase)
 	nw.TouchOutputFile()
-
-	if s.isAlreadyGenerated(nbBase) {
-		return nbHTMLPath, nil
-	}
 
 	s.setAlreadyGenerated(nbBase, nbHTMLPath)
 	fmt.Println("generating notebook", nbBase, "for", path)
@@ -237,26 +233,43 @@ func (s *Server) generateNotebook(l *url.URL) (string, error) {
 	if err != nil {
 		fmt.Println("error opening log file:", err)
 	}
-	_, err = s.llm.GenerateContent(ctx,
-		history,
-		llms.WithTemperature(1),
-		llms.WithMaxTokens(4096),
-		llms.WithStreamingFunc(func(ctx context.Context, chunk []byte) error {
-			// append to .claude.log:
-			if lf != nil {
-				lf.Write(chunk)
-			}
-			nw.AddPart(string(chunk))
-			return nil
-		}),
-	)
+
+	ch := make(chan string)
+	go func() {
+		defer close(ch)
+		_, err = s.llm.GenerateContent(ctx,
+			history,
+			llms.WithTemperature(1),
+			llms.WithMaxTokens(4096),
+			llms.WithStreamingFunc(func(ctx context.Context, chunk []byte) error {
+				// append to .claude.log:
+				if lf != nil {
+					lf.Write(chunk)
+				}
+				nw.AddPart(string(chunk))
+				if part, ok := nw.NextPart(); ok {
+					ch <- part
+				}
+				return nil
+			}),
+		)
+		if err != nil {
+			fmt.Println("error generating content:", err)
+			ch <- renderClientError(err)
+		}
+	}()
 	// finalize by writing to gen-%s-final.ipynb
 	if err := nw.Finish(); err != nil {
 		fmt.Println("error finalizing notebook:", err)
 	}
 	if err != nil {
 		fmt.Println("error generating content:", err)
-		return "", err
+		return nil, err
 	}
-	return nbHTMLPath, nil
+	return ch, nil
+}
+
+// renderClientError returns an HTML error message for the client
+func renderClientError(err error) string {
+	return fmt.Sprintf("<div><h1>Error</h1><p>%s</p></div>", err)
 }

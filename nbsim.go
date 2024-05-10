@@ -45,6 +45,7 @@ type notebookWriter struct {
 	repaired    string
 	baseDir     string
 	outfileBase string
+	done        bool
 }
 
 func NewNotebookWriter(baseDir string, outfileBase string) *notebookWriter {
@@ -86,8 +87,14 @@ func (nw *notebookWriter) AddPart(part string) {
 	os.WriteFile(of, []byte(repaired), 0644)
 }
 
+// NextPart returns the next part to write to the notebook.
+func (nw *notebookWriter) NextPart() (string, bool) {
+	return nw.parts[len(nw.parts)-1], true
+}
+
 func (nw *notebookWriter) Finish() error {
 	// write -final version:
+	nw.done = true
 	return os.WriteFile(nw.filePath("-final"), []byte(nw.repaired), 0644)
 }
 
