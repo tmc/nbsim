@@ -87,9 +87,38 @@ func (nw *notebookWriter) AddPart(part string) {
 	os.WriteFile(of, []byte(repaired), 0644)
 }
 
-// NextPart returns the next part to write to the notebook.
+func (nw *notebookWriter) convert() {
+	nb := &notebooks.Notebook{}
+	if nw.repaired == "" {
+		return
+	}
+	os.WriteFile(fmt.Sprintf("%s-raw.ipynb", nw.outfileBase), []byte(nw.repaired), 0644)
+	if err := json.Unmarshal([]byte(nw.repaired), nb); err != nil {
+		fmt.Println("issue unmarshalling json:", err)
+		return
+	}
+	nb.Validate()
+	repaired, err := json.MarshalIndent(nb, "", "  ")
+	if err != nil {
+		fmt.Println("issue marshalling json:", err)
+		return
+	}
+	// write to generated.ipynb then run nbconvert:
+	of := fmt.Sprintf("%s.ipynb", nw.outfileBase)
+	os.WriteFile(of, []byte(repaired), 0644)
+	// run nbconvert to convert the notebook to HTML:
+	cmd := exec.Command("jupyter", "nbconvert", "--to", "html", of)
+	cmd.Run()
+}
+
 func (nw *notebookWriter) NextPart() (string, bool) {
-	return nw.parts[len(nw.parts)-1], true
+	htmlFile := nw.filePath(fmt.Sprintf("%s.html", nw.outfileBase))
+	htmlContent, err := os.ReadFile(htmlFile)
+	if err != nil {
+		fmt.Println("error reading HTML file:", err)
+		return "", false
+	}
+	return string(htmlContent), true
 }
 
 func (nw *notebookWriter) Finish() error {
@@ -108,32 +137,6 @@ func (nw *notebookWriter) startConverter(ctx context.Context) {
 			nw.convert()
 		}
 	}
-}
-
-func (nw *notebookWriter) convert() {
-	nb := &notebooks.Notebook{}
-	if nw.repaired == "" {
-		return
-	}
-	os.WriteFile(fmt.Sprintf("%s-raw.ipynb", nw.outfileBase), []byte(nw.repaired), 0644)
-	if err := json.Unmarshal([]byte(nw.repaired), nb); err != nil {
-		fmt.Println("issue unmarshalling json:", err)
-		return
-	}
-	nb.Validate()
-	repaired, err := json.MarshalIndent(nb, "", "  ")
-	if err != nil {
-		fmt.Println("issue marshalling json:", err)
-		return
-	}
-	// write to generated.ipynb then run nbonvert:
-	of := fmt.Sprintf("%s.ipynb", nw.outfileBase)
-	os.WriteFile(of, []byte(repaired), 0644)
-	// run nbconvert:
-	cmd := exec.Command("jupyter", "nbconvert", "--to", "html", of)
-	// cmd.Stdout = os.Stdout
-	// cmd.Stderr = os.Stderr
-	cmd.Start()
 }
 
 func (nw *notebookWriter) TouchOutputFile() {

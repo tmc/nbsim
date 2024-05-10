@@ -189,7 +189,6 @@ func (s *Server) trickleNotebook(ctx context.Context, l *url.URL) (chan string, 
 	if err != nil {
 		return nil, err
 	}
-
 	ch := make(chan string)
 	go func() {
 		defer close(ch)
