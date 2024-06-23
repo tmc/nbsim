@@ -23,7 +23,7 @@ import (
 
 var (
 	flagServe  = flag.Bool("serve", true, "run in serve mode")
-	flagModel  = flag.String("model", "claude-3-opus-20240229", "model to use")
+	flagModel  = flag.String("model", "claude-3-5-sonnet-20240620", "model to use")
 	flagGenDir = flag.String("gen-dir", "generated", "directory to write generated notebooks to")
 )
 
@@ -99,6 +99,7 @@ func repl(ctx context.Context, llm llms.Model) error {
 		llms.TextParts(llms.ChatMessageTypeSystem, nbsim.SystemPrompt),
 	}
 	nw := nbsim.NewNotebookWriter(*flagGenDir, "generated")
+	defer nw.Finish()
 	for {
 		ctx, cancelFn := context.WithCancel(ctx)
 		fmt.Print("$ ")
@@ -156,11 +157,18 @@ func repl(ctx context.Context, llm llms.Model) error {
 // isAlreadyGenerated returns true if the key has already been generated.
 // If the key is not in the alreadyGenerated map, it will check the filesystem
 func (s *Server) isAlreadyGenerated(key string) bool {
-	_, ok := s.alreadyGenerated[key]
-	if !ok {
-		// stat the file to see if it exists:
-		_, err := os.Stat(path.Join(*flagGenDir, key+".ipynb"))
-		ok = err == nil
+	ok := false
+	// stat the file to see if it exists:
+	si, err := os.Stat(path.Join(*flagGenDir, key+"-final.ipynb"))
+	ok = err == nil
+	// if the file exists, check if it's old enough to be considered stale:
+	if ok {
+		if time.Since(si.ModTime()) > 24*time.Hour {
+			ok = false
+		}
+		if si.Size() == 0 {
+			ok = false
+		}
 	}
 	return ok
 }
@@ -174,9 +182,10 @@ func (s *Server) trickleNotebook(ctx context.Context, l *url.URL) (chan string, 
 	path := l.String()
 	nbBase := fmt.Sprintf("gen-%x", md5.Sum([]byte(l.String())))
 	// if we already have an output file, return early, unless it looks old enough and is empty:
+	fmt.Println("already generated?", s.isAlreadyGenerated(nbBase))
 	if !s.isAlreadyGenerated(nbBase) {
 		fmt.Println("opting to generate notebook", nbBase, "for", path)
-		return s.generateNotebook(l)
+		return s.generateNotebook(ctx, l)
 	}
 
 	nw := nbsim.NewNotebookWriter(*flagGenDir, nbBase)
@@ -185,6 +194,7 @@ func (s *Server) trickleNotebook(ctx context.Context, l *url.URL) (chan string, 
 
 	fmt.Println("trickling notebook", nbBase, "for", path)
 	// we trickle by opening the -final file and writing it to the -raw file:
+	fmt.Println(filepath.Join(*flagGenDir, nbBase+"-final.ipynb"))
 	f, err := os.ReadFile(filepath.Join(*flagGenDir, nbBase+"-final.ipynb"))
 	if err != nil {
 		return nil, err
@@ -195,6 +205,7 @@ func (s *Server) trickleNotebook(ctx context.Context, l *url.URL) (chan string, 
 		// split to fields, add parts with delay:
 		parts := strings.Fields(string(f))
 
+		fmt.Println(string(f))
 		fmt.Println("trickling", len(parts), "parts")
 		for _, part := range parts {
 			nw.AddPart(part)
@@ -207,7 +218,7 @@ func (s *Server) trickleNotebook(ctx context.Context, l *url.URL) (chan string, 
 	return ch, nil
 }
 
-func (s *Server) generateNotebook(l *url.URL) (chan string, error) {
+func (s *Server) generateNotebook(ctx context.Context, l *url.URL) (chan string, error) {
 	// md5 the url to get a unique identifier:
 	path := l.String()
 	nbBase := fmt.Sprintf("gen-%x", md5.Sum([]byte(l.String())))
@@ -218,9 +229,6 @@ func (s *Server) generateNotebook(l *url.URL) (chan string, error) {
 
 	s.setAlreadyGenerated(nbBase, nbHTMLPath)
 	fmt.Println("generating notebook", nbBase, "for", path)
-
-	ctx, cancelFn := context.WithCancel(context.Background())
-	defer cancelFn()
 
 	history := []llms.MessageContent{
 		llms.TextParts(llms.ChatMessageTypeSystem, nbsim.SystemPrompt),
@@ -235,7 +243,9 @@ func (s *Server) generateNotebook(l *url.URL) (chan string, error) {
 
 	ch := make(chan string)
 	go func() {
+		defer nw.Finish()
 		defer close(ch)
+		ctx := context.WithoutCancel(ctx)
 		_, err = s.llm.GenerateContent(ctx,
 			history,
 			llms.WithTemperature(1),
@@ -257,10 +267,6 @@ func (s *Server) generateNotebook(l *url.URL) (chan string, error) {
 			ch <- renderClientError(err)
 		}
 	}()
-	// finalize by writing to gen-%s-final.ipynb
-	if err := nw.Finish(); err != nil {
-		fmt.Println("error finalizing notebook:", err)
-	}
 	if err != nil {
 		fmt.Println("error generating content:", err)
 		return nil, err

@@ -76,6 +76,7 @@ func (h *Handler) serveStreamedNotebookConversion1(w http.ResponseWriter, r *htt
 	r.URL.Scheme = ""
 
 	if strings.HasPrefix(r.URL.Path, "/gen-") {
+		fmt.Println("GenFunc for", r.URL.Path)
 		p, err := h.GenFunc(r.Context(), r.URL)
 		fmt.Println(r.URL.Path, "GenFunc returned", p, err)
 		return

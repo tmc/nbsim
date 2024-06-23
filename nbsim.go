@@ -107,23 +107,30 @@ func (nw *notebookWriter) convert() {
 	of := fmt.Sprintf("%s.ipynb", nw.outfileBase)
 	os.WriteFile(of, []byte(repaired), 0644)
 	// run nbconvert to convert the notebook to HTML:
+	fmt.Println("running nbconvert on", of)
 	cmd := exec.Command("jupyter", "nbconvert", "--to", "html", of)
 	cmd.Run()
 }
 
 func (nw *notebookWriter) NextPart() (string, bool) {
-	htmlFile := nw.filePath(fmt.Sprintf("%s.html", nw.outfileBase))
-	htmlContent, err := os.ReadFile(htmlFile)
-	if err != nil {
-		fmt.Println("error reading HTML file:", err)
+	if len(nw.parts) == 0 {
 		return "", false
 	}
-	return string(htmlContent), true
+	return nw.parts[len(nw.parts)-1], true
+	// htmlFile := nw.filePath(fmt.Sprintf("%s.html", nw.outfileBase))
+	// htmlContent, err := os.ReadFile(htmlFile)
+	// if err != nil {
+	// 	fmt.Println("error reading HTML file:", err)
+	// 	return "", false
+	// }
+	// return string(htmlContent), true
 }
 
 func (nw *notebookWriter) Finish() error {
+	fmt.Println("finishing notebook")
 	// write -final version:
 	nw.done = true
+	nw.convert()
 	return os.WriteFile(nw.filePath("-final"), []byte(nw.repaired), 0644)
 }
 
